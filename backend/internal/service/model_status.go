@@ -7,6 +7,7 @@ import (
 
 	"github.com/new-api-tools/backend/internal/cache"
 	"github.com/new-api-tools/backend/internal/database"
+	"github.com/new-api-tools/backend/internal/storage"
 )
 
 // Constants for model status
@@ -64,12 +65,13 @@ func roundRate(rate float64) float64 {
 
 // ModelStatusService handles model availability monitoring
 type ModelStatusService struct {
-	db *database.Manager
+	db    *database.Manager
+	store *storage.ConfigStore
 }
 
 // NewModelStatusService creates a new ModelStatusService
 func NewModelStatusService() *ModelStatusService {
-	return &ModelStatusService{db: database.Get()}
+	return &ModelStatusService{db: database.Get(), store: storage.GetConfigStore()}
 }
 
 // GetAvailableModels returns all models with 24h request counts
@@ -247,9 +249,8 @@ func (s *ModelStatusService) GetAllModelsStatus(window string) ([]map[string]int
 
 // GetSelectedModels returns selected model names from cache
 func (s *ModelStatusService) GetSelectedModels() []string {
-	cm := cache.Get()
 	var models []string
-	found, _ := cm.GetJSON("model_status:selected_models", &models)
+	found, _ := s.store.GetJSON("model_status:selected_models", &models)
 	if found {
 		return models
 	}
@@ -258,22 +259,19 @@ func (s *ModelStatusService) GetSelectedModels() []string {
 
 // SetSelectedModels saves selected models to cache
 func (s *ModelStatusService) SetSelectedModels(models []string) {
-	cm := cache.Get()
-	cm.Set("model_status:selected_models", models, 0) // no expiry
+	_ = s.store.SetJSON("model_status:selected_models", models, "模型状态监控-已选模型")
 }
 
 // GetConfig returns all model status config
 func (s *ModelStatusService) GetConfig() map[string]interface{} {
-	cm := cache.Get()
-
 	var timeWindow string
-	found, _ := cm.GetJSON("model_status:time_window", &timeWindow)
+	found, _ := s.store.GetJSON("model_status:time_window", &timeWindow)
 	if !found {
 		timeWindow = DefaultTimeWindow
 	}
 
 	var theme string
-	found, _ = cm.GetJSON("model_status:theme", &theme)
+	found, _ = s.store.GetJSON("model_status:theme", &theme)
 	if !found {
 		theme = DefaultTheme
 	}
@@ -283,22 +281,22 @@ func (s *ModelStatusService) GetConfig() map[string]interface{} {
 	}
 
 	var refreshInterval int
-	found, _ = cm.GetJSON("model_status:refresh_interval", &refreshInterval)
+	found, _ = s.store.GetJSON("model_status:refresh_interval", &refreshInterval)
 	if !found {
 		refreshInterval = 60
 	}
 
 	var sortMode string
-	found, _ = cm.GetJSON("model_status:sort_mode", &sortMode)
+	found, _ = s.store.GetJSON("model_status:sort_mode", &sortMode)
 	if !found {
 		sortMode = "default"
 	}
 
 	var customOrder []string
-	cm.GetJSON("model_status:custom_order", &customOrder)
+	s.store.GetJSON("model_status:custom_order", &customOrder)
 
 	var customGroups []map[string]interface{}
-	found, _ = cm.GetJSON("model_status:custom_groups", &customGroups)
+	found, _ = s.store.GetJSON("model_status:custom_groups", &customGroups)
 	if !found {
 		customGroups = []map[string]interface{}{}
 	}
@@ -317,39 +315,33 @@ func (s *ModelStatusService) GetConfig() map[string]interface{} {
 
 // SetTimeWindow saves time window to cache
 func (s *ModelStatusService) SetTimeWindow(window string) {
-	cm := cache.Get()
-	cm.Set("model_status:time_window", window, 0)
+	_ = s.store.SetJSON("model_status:time_window", window, "模型状态监控-时间窗口")
 }
 
 // SetTheme saves theme to cache
 func (s *ModelStatusService) SetTheme(theme string) {
-	cm := cache.Get()
-	cm.Set("model_status:theme", theme, 0)
+	_ = s.store.SetJSON("model_status:theme", theme, "模型状态监控-主题")
 }
 
 // SetRefreshInterval saves refresh interval to cache
 func (s *ModelStatusService) SetRefreshInterval(interval int) {
-	cm := cache.Get()
-	cm.Set("model_status:refresh_interval", interval, 0)
+	_ = s.store.SetJSON("model_status:refresh_interval", interval, "模型状态监控-刷新间隔")
 }
 
 // SetSortMode saves sort mode to cache
 func (s *ModelStatusService) SetSortMode(mode string) {
-	cm := cache.Get()
-	cm.Set("model_status:sort_mode", mode, 0)
+	_ = s.store.SetJSON("model_status:sort_mode", mode, "模型状态监控-排序模式")
 }
 
 // SetCustomOrder saves custom order to cache
 func (s *ModelStatusService) SetCustomOrder(order []string) {
-	cm := cache.Get()
-	cm.Set("model_status:custom_order", order, 0)
+	_ = s.store.SetJSON("model_status:custom_order", order, "模型状态监控-自定义排序")
 }
 
 // GetCustomGroups returns custom model groups from cache
 func (s *ModelStatusService) GetCustomGroups() []map[string]interface{} {
-	cm := cache.Get()
 	var groups []map[string]interface{}
-	found, _ := cm.GetJSON("model_status:custom_groups", &groups)
+	found, _ := s.store.GetJSON("model_status:custom_groups", &groups)
 	if found {
 		return groups
 	}
@@ -358,15 +350,13 @@ func (s *ModelStatusService) GetCustomGroups() []map[string]interface{} {
 
 // SetCustomGroups saves custom model groups to cache
 func (s *ModelStatusService) SetCustomGroups(groups []map[string]interface{}) {
-	cm := cache.Get()
-	cm.Set("model_status:custom_groups", groups, 0) // no expiry
+	_ = s.store.SetJSON("model_status:custom_groups", groups, "模型状态监控-自定义分组")
 }
 
 // GetSiteTitle returns the custom site title
 func (s *ModelStatusService) GetSiteTitle() string {
-	cm := cache.Get()
 	var title string
-	found, _ := cm.GetJSON("model_status:site_title", &title)
+	found, _ := s.store.GetJSON("model_status:site_title", &title)
 	if found {
 		return title
 	}
@@ -375,8 +365,7 @@ func (s *ModelStatusService) GetSiteTitle() string {
 
 // SetSiteTitle saves the custom site title
 func (s *ModelStatusService) SetSiteTitle(title string) {
-	cm := cache.Get()
-	cm.Set("model_status:site_title", title, 0)
+	_ = s.store.SetJSON("model_status:site_title", title, "模型状态监控-站点标题")
 }
 
 // GetEmbedConfig returns embed page configuration

@@ -28,8 +28,10 @@ type Config struct {
 	TimeZone   string `json:"timezone"`
 
 	// Database
-	SQLDSN         string         `json:"sql_dsn"`
-	DatabaseEngine DatabaseEngine `json:"database_engine"`
+	SQLDSN             string         `json:"sql_dsn"`
+	ToolsSQLDSN        string         `json:"tools_sql_dsn"`
+	DatabaseEngine     DatabaseEngine `json:"database_engine"`
+	ToolsDatabaseEngine DatabaseEngine `json:"tools_database_engine"`
 
 	// Redis
 	RedisConnString string `json:"redis_conn_string"`
@@ -68,7 +70,8 @@ func Load() *Config {
 		TimeZone:   getEnvStrMulti([]string{"TIMEZONE", "TZ"}, "Asia/Shanghai"),
 
 		// Database
-		SQLDSN: getEnvStr("SQL_DSN", ""),
+		SQLDSN:      getEnvStr("SQL_DSN", ""),
+		ToolsSQLDSN: getEnvStr("TOOLS_SQL_DSN", ""),
 
 		// Redis
 		RedisConnString: getEnvStr("REDIS_CONN_STRING", ""),
@@ -105,8 +108,13 @@ func Load() *Config {
 		cfg.RedisConnString = buildRedisConnString()
 	}
 
+	if cfg.ToolsSQLDSN == "" {
+		cfg.ToolsSQLDSN = cfg.SQLDSN
+	}
+
 	// Auto-detect database engine from DSN
 	cfg.DatabaseEngine = detectEngine(cfg.SQLDSN)
+	cfg.ToolsDatabaseEngine = detectEngine(cfg.ToolsSQLDSN)
 
 	// Generate random JWT secret if not explicitly configured
 	if cfg.JWTSecretKey == "" {
@@ -226,6 +234,28 @@ func (c *Config) DSN() string {
 // DriverName returns the database driver name for sqlx
 func (c *Config) DriverName() string {
 	switch c.DatabaseEngine {
+	case PostgreSQL:
+		return "pgx"
+	default:
+		return "mysql"
+	}
+}
+
+// ToolsDSN returns the tools/config database DSN, falling back to SQL_DSN for compatibility.
+func (c *Config) ToolsDSN() string {
+	dsn := c.ToolsSQLDSN
+	if dsn == "" {
+		dsn = c.SQLDSN
+	}
+	if strings.HasPrefix(dsn, "mysql://") {
+		dsn = strings.TrimPrefix(dsn, "mysql://")
+	}
+	return dsn
+}
+
+// ToolsDriverName returns the database driver name for the tools/config database.
+func (c *Config) ToolsDriverName() string {
+	switch c.ToolsDatabaseEngine {
 	case PostgreSQL:
 		return "pgx"
 	default:

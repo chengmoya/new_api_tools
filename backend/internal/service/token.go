@@ -101,8 +101,9 @@ func (s *TokenService) ListTokens(params TokenListParams) (map[string]interface{
 	conditions = append(conditions, "t.deleted_at IS NULL")
 
 	if params.Name != "" {
-		conditions = append(conditions, "t.name LIKE ?")
-		args = append(args, "%"+params.Name+"%")
+		conditions = append(conditions, "(t.name LIKE ? OR COALESCE(u.username, '') LIKE ?)")
+		likeValue := "%" + params.Name + "%"
+		args = append(args, likeValue, likeValue)
 	}
 	if params.UserID > 0 {
 		conditions = append(conditions, "t.user_id = ?")
@@ -131,7 +132,7 @@ func (s *TokenService) ListTokens(params TokenListParams) (map[string]interface{
 	whereClause := strings.Join(conditions, " AND ")
 
 	// Count total
-	countQuery := s.db.RebindQuery(fmt.Sprintf("SELECT COUNT(*) as total FROM tokens t WHERE %s", whereClause))
+	countQuery := s.db.RebindQuery(fmt.Sprintf("SELECT COUNT(*) as total FROM tokens t LEFT JOIN users u ON t.user_id = u.id WHERE %s", whereClause))
 	countRow, err := s.db.QueryOne(countQuery, args...)
 	if err != nil {
 		return nil, err

@@ -11,12 +11,14 @@ import (
 	"github.com/new-api-tools/backend/internal/cache"
 	"github.com/new-api-tools/backend/internal/database"
 	"github.com/new-api-tools/backend/internal/logger"
+	"github.com/new-api-tools/backend/internal/storage"
 )
 
 // AutoGroupService handles automatic user group assignment
 // Mirrors Python auto_group_service.py functionality
 type AutoGroupService struct {
 	db           *database.Manager
+	store        *storage.ConfigStore
 	cachedConfig map[string]interface{} // 优化3: 请求级配置缓存
 }
 
@@ -31,7 +33,7 @@ var allAutoGroupOAuthColumns = []string{"github_id", "wechat_id", "telegram_id",
 
 // NewAutoGroupService creates a new AutoGroupService
 func NewAutoGroupService() *AutoGroupService {
-	return &AutoGroupService{db: database.Get()}
+	return &AutoGroupService{db: database.Get(), store: storage.GetConfigStore()}
 }
 
 // getGroupCol returns the properly quoted column name for "group"
@@ -143,9 +145,8 @@ func (s *AutoGroupService) invalidateConfigCache() {
 
 // GetConfig returns auto group configuration (always fresh from Redis)
 func (s *AutoGroupService) GetConfig() map[string]interface{} {
-	cm := cache.Get()
 	var config map[string]interface{}
-	found, _ := cm.GetJSON("auto_group:config", &config)
+	found, _ := s.store.GetJSON("auto_group:config", &config)
 	if found && config != nil {
 		result := make(map[string]interface{})
 		for k, v := range defaultAutoGroupConfig {
@@ -169,8 +170,7 @@ func (s *AutoGroupService) SaveConfig(updates map[string]interface{}) bool {
 	for k, v := range updates {
 		config[k] = v
 	}
-	cm := cache.Get()
-	if err := cm.Set("auto_group:config", config, 0); err != nil {
+	if err := s.store.SetJSON("auto_group:config", config, "自动分组配置"); err != nil {
 		logger.L.Error(fmt.Sprintf("保存自动分组配置失败: %v", err))
 		return false
 	}

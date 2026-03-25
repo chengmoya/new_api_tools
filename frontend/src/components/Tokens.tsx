@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useToast } from './Toast'
 import { useAuth } from '../contexts/AuthContext'
-import { Key, Loader2, RefreshCw, Filter, Search, CheckCircle2, XCircle, AlertCircle, Clock } from 'lucide-react'
+import { Key, Loader2, RefreshCw, Filter, Search, CheckCircle2, XCircle, AlertCircle, Clock, Ban, ShieldCheck } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
@@ -139,6 +139,33 @@ export function Tokens() {
     return <Badge variant="secondary">禁用</Badge>
   }
 
+  const handleToggleTokenStatus = async (record: TokenRecord) => {
+    const isEnabled = record.status === 1
+    const endpoint = isEnabled ? 'disable' : 'enable'
+    const actionText = isEnabled ? '禁用' : '启用'
+
+    try {
+      const response = await fetch(`${apiUrl}/api/users/tokens/${record.id}/${endpoint}`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          reason: `令牌管理页${actionText}令牌`,
+          context: { source: 'token_management' },
+        }),
+      })
+      const data = await response.json()
+      if (data.success) {
+        showToast('success', data.message || `令牌已${actionText}`)
+        await Promise.all([fetchTokens(), fetchStatistics()])
+      } else {
+        showToast('error', data.message || `${actionText}失败`)
+      }
+    } catch (error) {
+      console.error(`Failed to ${endpoint} token:`, error)
+      showToast('error', `${actionText}失败`)
+    }
+  }
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       {/* Header */}
@@ -202,14 +229,14 @@ export function Tokens() {
         <CardContent>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">名称搜索</label>
+              <label className="text-xs font-medium text-muted-foreground">名称/用户名搜索</label>
               <div className="relative">
                 <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input
                   type="text"
                   value={nameSearch}
                   onChange={(e) => setNameSearch(e.target.value)}
-                  placeholder="搜索令牌名称..."
+                  placeholder="搜索令牌名称或用户名..."
                   className="pl-9"
                 />
               </div>
@@ -264,6 +291,7 @@ export function Tokens() {
                     <TableHead>创建时间</TableHead>
                     <TableHead>最后使用</TableHead>
                     <TableHead>过期时间</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -328,6 +356,27 @@ export function Tokens() {
                             {formatTimestamp(t.expired_time)}
                           </div>
                         ) : '永不过期'}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          variant={t.status === 1 ? 'destructive' : 'default'}
+                          size="sm"
+                          onClick={() => handleToggleTokenStatus(t)}
+                          disabled={loading}
+                          className="h-8"
+                        >
+                          {t.status === 1 ? (
+                            <>
+                              <Ban className="h-4 w-4 mr-1" />
+                              禁用
+                            </>
+                          ) : (
+                            <>
+                              <ShieldCheck className="h-4 w-4 mr-1" />
+                              启用
+                            </>
+                          )}
+                        </Button>
                       </TableCell>
                     </TableRow>
                   ))}

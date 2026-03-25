@@ -1137,6 +1137,304 @@ class RiskMonitoringService:
             logger.db_error(f"获取 Token 轮换用户失败: {e}")
             return {"items": [], "total": 0}
 
+    def _calculate_median(self, values: List[float]) -> float:
+        """计算中位数。"""
+        if not values:
+            return 0.0
+
+        sorted_values = sorted(float(v) for v in values)
+        mid = len(sorted_values) // 2
+        if len(sorted_values) % 2 == 1:
+            return sorted_values[mid]
+        return (sorted_values[mid - 1] + sorted_values[mid]) / 2
+
+    def get_low_token_burst_users(
+        self,
+        window_seconds: int,
+        low_token_threshold: int = 500,
+        low_token_ratio_threshold: float = 0.8,
+        low_token_request_threshold: int = 50,
+        limit: int = 50,
+        now: Optional[int] = None,
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        检测高频低 Token 调用用户。
+
+        规则：
+        - 窗口内请求量达到阈值
+        - 多数请求的单次 token 消耗低于阈值
+        """
+        if now is None:
+            now = int(time.time())
+        start_time = now - window_seconds
+
+        cache_key = (
+            f"low_token_burst:{window_seconds}:{low_token_threshold}:"
+            f"{low_token_ratio_threshold}:{low_token_request_threshold}:{limit}"
+        )
+        if use_cache:
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        self.db.connect()
+
+        sql = """
+            SELECT
+                user_id,
+                MAX(username) as username,
+                COUNT(*) as total_requests,
+                SUM(
+                    CASE
+                        WHEN (COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) <= :low_token_threshold
+                        THEN 1 ELSE 0
+                    END
+                ) as low_token_requests,
+                AVG(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) as avg_tokens_per_request,
+                MAX(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) as max_tokens_per_request,
+                MIN(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) as min_tokens_per_request,
+                MIN(created_at) as first_seen,
+                MAX(created_at) as last_seen
+            FROM logs
+            WHERE created_at >= :start_time AND created_at <= :end_time
+                AND type IN (2, 5)
+                AND user_id IS NOT NULL
+            GROUP BY user_id
+            HAVING COUNT(*) >= :low_token_request_threshold
+                AND SUM(
+                    CASE
+                        WHEN (COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) <= :low_token_threshold
+                        THEN 1 ELSE 0
+                    END
+                ) * 1.0 / COUNT(*) >= :low_token_ratio_threshold
+            ORDER BY total_requests DESC, low_token_requests DESC
+            LIMIT :limit
+        """
+
+        try:
+            rows = self.db.execute(sql, {
+                "start_time": start_time,
+                "end_time": now,
+                "low_token_threshold": low_token_threshold,
+                "low_token_request_threshold": low_token_request_threshold,
+                "low_token_ratio_threshold": low_token_ratio_threshold,
+                "limit": limit,
+            }) or []
+
+            items = []
+            for row in rows:
+                total_requests = int(row.get("total_requests") or 0)
+                low_token_requests = int(row.get("low_token_requests") or 0)
+                low_token_ratio = (low_token_requests / total_requests) if total_requests else 0.0
+
+                items.append({
+                    "user_id": int(row.get("user_id") or 0),
+                    "username": row.get("username") or "",
+                    "total_requests": total_requests,
+                    "low_token_requests": low_token_requests,
+                    "low_token_ratio": round(low_token_ratio, 4),
+                    "avg_tokens_per_request": round(float(row.get("avg_tokens_per_request") or 0), 2),
+                    "max_tokens_per_request": int(row.get("max_tokens_per_request") or 0),
+                    "min_tokens_per_request": int(row.get("min_tokens_per_request") or 0),
+                    "first_seen": int(row.get("first_seen") or 0),
+                    "last_seen": int(row.get("last_seen") or 0),
+                    "window_seconds": window_seconds,
+                    "risk_level": "high" if low_token_ratio >= 0.9 else "medium",
+                    "rule_name": "LOW_TOKEN_BURST",
+                })
+
+            result = {
+                "items": items,
+                "total": len(items),
+                "window_seconds": window_seconds,
+                "thresholds": {
+                    "low_token_threshold": low_token_threshold,
+                    "low_token_ratio_threshold": low_token_ratio_threshold,
+                    "low_token_request_threshold": low_token_request_threshold,
+                },
+            }
+            ttl = _get_cache_ttl()
+            _cache.set(cache_key, result, ttl)
+            logger.success(
+                "风控 缓存更新: low_token_burst",
+                users=len(items),
+                low_token_threshold=low_token_threshold,
+                TTL=f"{ttl}s"
+            )
+            return result
+        except Exception as e:
+            logger.db_error(f"获取高频低Token用户失败: {e}")
+            return {"items": [], "total": 0}
+
+    def get_token_usage_volatility_users(
+        self,
+        window_seconds: int,
+        min_requests: int = 5,
+        jump_ratio: float = 5.0,
+        limit: int = 50,
+        now: Optional[int] = None,
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        检测同一 Token 在短窗口内 token 消耗剧烈波动的用户。
+
+        核心指标：
+        - max/median
+        - 相邻请求最大跳变倍数
+        """
+        if now is None:
+            now = int(time.time())
+        start_time = now - window_seconds
+
+        cache_key = f"token_usage_volatility:{window_seconds}:{min_requests}:{jump_ratio}:{limit}"
+        if use_cache:
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        self.db.connect()
+
+        sql = """
+            SELECT
+                user_id,
+                MAX(username) as username,
+                token_id,
+                MAX(token_name) as token_name,
+                created_at,
+                COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) as total_tokens
+            FROM logs
+            WHERE created_at >= :start_time AND created_at <= :end_time
+                AND type IN (2, 5)
+                AND user_id IS NOT NULL
+                AND token_id IS NOT NULL AND token_id > 0
+            ORDER BY user_id ASC, token_id ASC, created_at ASC, id ASC
+        """
+
+        try:
+            rows = self.db.execute(sql, {
+                "start_time": start_time,
+                "end_time": now,
+            }) or []
+
+            token_groups: Dict[tuple[int, int], Dict[str, Any]] = {}
+            for row in rows:
+                user_id = int(row.get("user_id") or 0)
+                token_id = int(row.get("token_id") or 0)
+                if user_id <= 0 or token_id <= 0:
+                    continue
+
+                key = (user_id, token_id)
+                if key not in token_groups:
+                    token_groups[key] = {
+                        "user_id": user_id,
+                        "username": row.get("username") or "",
+                        "token_id": token_id,
+                        "token_name": row.get("token_name") or "",
+                        "samples": [],
+                    }
+
+                token_groups[key]["samples"].append({
+                    "created_at": int(row.get("created_at") or 0),
+                    "total_tokens": int(row.get("total_tokens") or 0),
+                })
+
+            suspicious_by_user: Dict[int, Dict[str, Any]] = {}
+            for token_data in token_groups.values():
+                samples = token_data["samples"]
+                if len(samples) < min_requests:
+                    continue
+
+                token_values = [max(1, int(item["total_tokens"])) for item in samples]
+                median_tokens = self._calculate_median(token_values)
+                max_tokens = max(token_values)
+                min_tokens = min(token_values)
+                max_median_ratio = (max_tokens / median_tokens) if median_tokens > 0 else 0.0
+
+                adjacent_jump_ratio = 0.0
+                largest_jump_pair = None
+                for index in range(1, len(token_values)):
+                    prev_value = max(1, token_values[index - 1])
+                    current_value = max(1, token_values[index])
+                    ratio = max(current_value / prev_value, prev_value / current_value)
+                    if ratio > adjacent_jump_ratio:
+                        adjacent_jump_ratio = ratio
+                        largest_jump_pair = {
+                            "from_tokens": token_values[index - 1],
+                            "to_tokens": token_values[index],
+                            "from_created_at": samples[index - 1]["created_at"],
+                            "to_created_at": samples[index]["created_at"],
+                        }
+
+                if max_median_ratio < jump_ratio and adjacent_jump_ratio < jump_ratio:
+                    continue
+
+                user_id = token_data["user_id"]
+                if user_id not in suspicious_by_user:
+                    suspicious_by_user[user_id] = {
+                        "user_id": user_id,
+                        "username": token_data["username"],
+                        "token_count": 0,
+                        "suspicious_tokens": [],
+                        "max_adjacent_jump_ratio": 0.0,
+                        "max_median_ratio": 0.0,
+                        "window_seconds": window_seconds,
+                        "rule_name": "TOKEN_USAGE_VOLATILITY",
+                    }
+
+                suspicious_by_user[user_id]["token_count"] += 1
+                suspicious_by_user[user_id]["max_adjacent_jump_ratio"] = round(
+                    max(suspicious_by_user[user_id]["max_adjacent_jump_ratio"], adjacent_jump_ratio),
+                    4,
+                )
+                suspicious_by_user[user_id]["max_median_ratio"] = round(
+                    max(suspicious_by_user[user_id]["max_median_ratio"], max_median_ratio),
+                    4,
+                )
+                suspicious_by_user[user_id]["suspicious_tokens"].append({
+                    "token_id": token_data["token_id"],
+                    "token_name": token_data["token_name"],
+                    "request_count": len(samples),
+                    "median_tokens": round(median_tokens, 2),
+                    "max_tokens": max_tokens,
+                    "min_tokens": min_tokens,
+                    "max_median_ratio": round(max_median_ratio, 4),
+                    "adjacent_jump_ratio": round(adjacent_jump_ratio, 4),
+                    "largest_jump_pair": largest_jump_pair,
+                    "sample_values": token_values[-5:],
+                })
+
+            items = sorted(
+                suspicious_by_user.values(),
+                key=lambda item: (item.get("max_adjacent_jump_ratio", 0), item.get("max_median_ratio", 0), item.get("token_count", 0)),
+                reverse=True,
+            )[:limit]
+
+            for item in items:
+                item["risk_level"] = "high" if item.get("max_adjacent_jump_ratio", 0) >= jump_ratio * 2 else "medium"
+
+            result = {
+                "items": items,
+                "total": len(items),
+                "window_seconds": window_seconds,
+                "thresholds": {
+                    "min_requests": min_requests,
+                    "jump_ratio": jump_ratio,
+                },
+            }
+            ttl = _get_cache_ttl()
+            _cache.set(cache_key, result, ttl)
+            logger.success(
+                "风控 缓存更新: token_usage_volatility",
+                users=len(items),
+                jump_ratio=jump_ratio,
+                TTL=f"{ttl}s"
+            )
+            return result
+        except Exception as e:
+            logger.db_error(f"获取Token消耗剧烈波动用户失败: {e}")
+            return {"items": [], "total": 0}
+
     def get_affiliated_accounts(
         self,
         min_invited: int = 3,

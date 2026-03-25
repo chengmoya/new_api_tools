@@ -67,6 +67,12 @@ class DisableTokenRequest(BaseModel):
     context: Optional[dict] = None
 
 
+class EnableTokenRequest(BaseModel):
+    """启用令牌请求"""
+    reason: Optional[str] = None
+    context: Optional[dict] = None
+
+
 def _get_operator_label(req: Request) -> str:
     auth = req.headers.get("Authorization") or ""
     if auth.startswith("Bearer "):
@@ -390,6 +396,29 @@ async def disable_token(
     service = get_user_management_service()
     operator = _get_operator_label(req)
     result = service.disable_token(
+        token_id=token_id,
+        reason=request.reason,
+        operator=operator,
+        context=request.context,
+    )
+    return DeleteResponse(
+        success=result["success"],
+        message=result["message"],
+        data=result.get("data"),
+    )
+
+
+@router.post("/tokens/{token_id}/enable", response_model=DeleteResponse)
+async def enable_token(
+    token_id: int,
+    request: EnableTokenRequest,
+    req: Request,
+    _: str = Depends(verify_auth),
+):
+    """启用单个令牌（status=1）。"""
+    service = get_user_management_service()
+    operator = _get_operator_label(req)
+    result = service.enable_token(
         token_id=token_id,
         reason=request.reason,
         operator=operator,

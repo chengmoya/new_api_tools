@@ -21,13 +21,24 @@ RUN npm run build
 # Stage 2: 构建 Go 后端
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend-builder
 ARG TARGETARCH
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=$GOPROXY
 WORKDIR /build
 RUN apk add --no-cache git ca-certificates tzdata
 
 # 先复制依赖文件，利用层缓存
 COPY backend/go.mod backend/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    set -eu; \
+    for i in 1 2 3; do \
+        go mod download && exit 0; \
+        if [ "$i" -lt 3 ]; then \
+            echo "go mod download failed, retrying ($i/3)..."; \
+            sleep 3; \
+        fi; \
+    done; \
+    echo "go mod download failed after 3 attempts" >&2; \
+    exit 1
 
 # 复制源码并编译，挂载 Go 编译缓存
 COPY backend/ .

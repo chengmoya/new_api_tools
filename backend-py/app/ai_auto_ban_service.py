@@ -161,6 +161,17 @@ class AIAutoBanService:
         # 定时扫描配置（0 表示关闭，单位：分钟）
         self._scan_interval_minutes = int(stored_config.get("scan_interval_minutes", 0))
 
+        # AI 可疑用户筛选配置
+        self._low_token_burst_enabled = bool(stored_config.get("low_token_burst_enabled", True))
+        self._low_token_burst_window_seconds = int(stored_config.get("low_token_burst_window_seconds", WINDOW_SECONDS.get("1h", 3600)))
+        self._low_token_threshold = int(stored_config.get("low_token_threshold", 500))
+        self._low_token_ratio_threshold = float(stored_config.get("low_token_ratio_threshold", 0.8))
+        self._low_token_request_threshold = int(stored_config.get("low_token_request_threshold", 50))
+        self._token_volatility_enabled = bool(stored_config.get("token_volatility_enabled", True))
+        self._token_volatility_window_seconds = int(stored_config.get("token_volatility_window_seconds", WINDOW_SECONDS.get("1h", 3600)))
+        self._token_volatility_min_requests = int(stored_config.get("token_volatility_min_requests", 5))
+        self._token_volatility_jump_ratio = float(stored_config.get("token_volatility_jump_ratio", 5.0))
+
         # 自定义提示词配置（空字符串表示使用默认提示词）
         self._custom_prompt = stored_config.get("custom_prompt", "")
 
@@ -217,7 +228,9 @@ class AIAutoBanService:
                 """
                 rows = db.execute(admin_sql, {})
                 for row in rows:
-                    admin_ids.add(int(row.get("id")))
+                    admin_id = int(row.get("id") or 0)
+                    if admin_id > 0:
+                        admin_ids.add(admin_id)
             except Exception as e:
                 logger.warning(f"查询管理员用户失败: {e}")
             
@@ -392,15 +405,10 @@ class AIAutoBanService:
         """
         获取可疑用户列表（触发风险阈值的用户）
 
-        筛选条件：
-        1. 请求量 >= 50（低活跃用户不进入可疑列表）
-        2. 满足任一 IP 风险标签：
-           - IP数量过多 (>= 10)
-           - IP快速切换 (>= 3次/60秒内)
-           - IP跳动异常 (平均停留<30秒且切换>=3次)
-        3. 排除的模型/分组请求占比 < 80%（主要使用排除模型/分组的用户不进入可疑列表）
-
-        注意：空回复率和失败率不作为筛选条件，因为嵌入模型本身不返回文本内容
+        当前支持来源：
+        1. IP 风险标签
+        2. 高频低 Token 调用
+        3. Token 消耗剧烈波动
         """
         window_seconds = WINDOW_SECONDS.get(window, 3600)
 
@@ -414,6 +422,7 @@ class AIAutoBanService:
 
         candidates = leaderboards.get("windows", {}).get(window, [])
         suspicious = []
+        suspicious_by_user: Dict[int, Dict[str, Any]] = {}
 
         # 只关注 IP 相关的风险标签
         ip_risk_flags = {"MANY_IPS", "IP_RAPID_SWITCH", "IP_HOPPING"}
@@ -422,8 +431,32 @@ class AIAutoBanService:
         # 排除模型/分组的请求占比阈值（超过此比例则跳过）
         excluded_ratio_threshold = 0.8
 
-        for user in candidates:
-            user_id = user.get("user_id")
+        low_token_hits = {}
+        if self._low_token_burst_enabled:
+            low_token_result = self._risk_service.get_low_token_burst_users(
+                window_seconds=self._low_token_burst_window_seconds,
+                low_token_threshold=self._low_token_threshold,
+                low_token_ratio_threshold=self._low_token_ratio_threshold,
+                low_token_request_threshold=self._low_token_request_threshold,
+                limit=max(limit * 3, 50),
+                use_cache=False,
+            )
+            low_token_hits = {item["user_id"]: item for item in low_token_result.get("items", [])}
+
+        volatility_hits = {}
+        if self._token_volatility_enabled:
+            volatility_result = self._risk_service.get_token_usage_volatility_users(
+                window_seconds=self._token_volatility_window_seconds,
+                min_requests=self._token_volatility_min_requests,
+                jump_ratio=self._token_volatility_jump_ratio,
+                limit=max(limit * 3, 50),
+                use_cache=False,
+            )
+            volatility_hits = {item["user_id"]: item for item in volatility_result.get("items", [])}
+
+        candidate_map = {user.get("user_id"): user for user in candidates if user.get("user_id")}
+        for user_id in set(candidate_map.keys()) | set(low_token_hits.keys()) | set(volatility_hits.keys()):
+            user = candidate_map.get(user_id, {})
             if not user_id:
                 continue
 
@@ -436,28 +469,71 @@ class AIAutoBanService:
 
             # 检查请求量门槛
             total_requests = analysis.get("summary", {}).get("total_requests", 0)
-            if total_requests < min_requests_threshold:
+            has_low_token_hit = user_id in low_token_hits
+            has_volatility_hit = user_id in volatility_hits
+            if total_requests < min_requests_threshold and not has_low_token_hit and not has_volatility_hit:
                 continue
 
             # 检查排除的模型/分组
-            if self._should_exclude_by_model_or_group(analysis, total_requests, excluded_ratio_threshold):
+            if self._should_exclude_by_model_or_group(analysis, max(total_requests, 1), excluded_ratio_threshold):
                 logger.debug(f"AI封禁: 用户 {user_id} 主要使用排除的模型/分组，跳过")
                 continue
 
             risk_flags = set(analysis.get("risk", {}).get("risk_flags", []))
+            triggered_rules: List[Dict[str, Any]] = []
 
-            # 判断是否可疑 - 只检查 IP 相关风险
-            is_suspicious = bool(risk_flags & ip_risk_flags)
-
-            if is_suspicious:
-                suspicious.append({
-                    "user_id": user_id,
-                    "username": user.get("username", ""),
-                    "analysis": analysis,
+            if risk_flags & ip_risk_flags:
+                triggered_rules.append({
+                    "rule_name": "IP_RISK",
+                    "window_seconds": window_seconds,
+                    "metrics": {
+                        "risk_flags": sorted(list(risk_flags & ip_risk_flags)),
+                        "unique_ips": analysis.get("summary", {}).get("unique_ips", 0),
+                        "rapid_switch_count": analysis.get("risk", {}).get("ip_switch_analysis", {}).get("rapid_switch_count", 0),
+                    },
                 })
 
-                if len(suspicious) >= limit:
-                    break
+            if has_low_token_hit:
+                low_token_hit = low_token_hits[user_id]
+                triggered_rules.append({
+                    "rule_name": low_token_hit.get("rule_name", "LOW_TOKEN_BURST"),
+                    "window_seconds": low_token_hit.get("window_seconds", self._low_token_burst_window_seconds),
+                    "metrics": {
+                        "total_requests": low_token_hit.get("total_requests", 0),
+                        "low_token_requests": low_token_hit.get("low_token_requests", 0),
+                        "low_token_ratio": low_token_hit.get("low_token_ratio", 0),
+                        "avg_tokens_per_request": low_token_hit.get("avg_tokens_per_request", 0),
+                        "low_token_threshold": self._low_token_threshold,
+                    },
+                })
+
+            if has_volatility_hit:
+                volatility_hit = volatility_hits[user_id]
+                triggered_rules.append({
+                    "rule_name": volatility_hit.get("rule_name", "TOKEN_USAGE_VOLATILITY"),
+                    "window_seconds": volatility_hit.get("window_seconds", self._token_volatility_window_seconds),
+                    "metrics": {
+                        "token_count": volatility_hit.get("token_count", 0),
+                        "max_adjacent_jump_ratio": volatility_hit.get("max_adjacent_jump_ratio", 0),
+                        "max_median_ratio": volatility_hit.get("max_median_ratio", 0),
+                        "suspicious_tokens": volatility_hit.get("suspicious_tokens", []),
+                        "jump_ratio_threshold": self._token_volatility_jump_ratio,
+                    },
+                })
+
+            if triggered_rules:
+                analysis.setdefault("risk", {})["triggered_rules"] = triggered_rules
+                suspicious_by_user[user_id] = {
+                    "user_id": user_id,
+                    "username": user.get("username") or analysis.get("user", {}).get("username", ""),
+                    "analysis": analysis,
+                    "triggered_rules": triggered_rules,
+                }
+
+        for item in suspicious_by_user.values():
+            suspicious.append(item)
+            if len(suspicious) >= limit:
+                break
 
         return suspicious
 
@@ -1103,6 +1179,73 @@ class AIAutoBanService:
             api_duration_ms=api_result.get("duration_ms", 0),
         )
 
+    def _build_ai_action_context(
+        self,
+        assessment: AIAssessmentResult,
+        analysis: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """构建 AI 自动处理的统一上下文。"""
+        return {
+            "source": "ai_auto_ban",
+            "risk_score": assessment.risk_score,
+            "confidence": assessment.confidence,
+            "ai_reason": assessment.reason,
+            "triggered_rules": analysis.get("risk", {}).get("triggered_rules", []),
+        }
+
+    def _resolve_target_token(self, analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """仅在能够明确定位单个令牌时返回目标令牌，否则返回 None。"""
+        suspicious_token_map: Dict[int, Dict[str, Any]] = {}
+        for rule in analysis.get("risk", {}).get("triggered_rules", []):
+            metrics = rule.get("metrics") or {}
+            for token in metrics.get("suspicious_tokens", []) or []:
+                token_id = int(token.get("token_id") or 0)
+                if token_id <= 0:
+                    continue
+                suspicious_token_map[token_id] = {
+                    "token_id": token_id,
+                    "token_name": token.get("token_name") or f"Token#{token_id}",
+                }
+
+        if len(suspicious_token_map) == 1:
+            return next(iter(suspicious_token_map.values()))
+
+        recent_token_map: Dict[int, Dict[str, Any]] = {}
+        for log in analysis.get("recent_logs", []) or []:
+            token_id = int(log.get("token_id") or 0)
+            if token_id <= 0:
+                continue
+            token_entry = recent_token_map.setdefault(token_id, {
+                "token_id": token_id,
+                "token_name": log.get("token_name") or f"Token#{token_id}",
+                "count": 0,
+            })
+            token_entry["count"] += 1
+
+        if len(recent_token_map) == 1:
+            only_token = next(iter(recent_token_map.values()))
+            return {
+                "token_id": only_token["token_id"],
+                "token_name": only_token["token_name"],
+            }
+
+        if int(analysis.get("summary", {}).get("unique_tokens") or 0) == 1 and recent_token_map:
+            only_token = max(recent_token_map.values(), key=lambda item: item.get("count", 0))
+            return {
+                "token_id": only_token["token_id"],
+                "token_name": only_token["token_name"],
+            }
+
+        return None
+
+    def _count_ai_disabled_tokens(self, user_id: int) -> int:
+        """统计同一用户被 AI 自动禁用令牌的次数。"""
+        return self._storage.count_security_audits(
+            action="disable_token",
+            user_id=user_id,
+            context_source="ai_auto_ban",
+        )
+
     async def process_user(
         self,
         user_id: int,
@@ -1146,30 +1289,76 @@ class AIAutoBanService:
         }
         result["action"] = assessment.action.value
         
+        action_context = self._build_ai_action_context(assessment, analysis)
+
         # 设置冷却期
         self._set_cooldown(user_id)
         
         # 根据决策执行
         if assessment.action == AIBanAction.BAN:
             if self._dry_run:
-                result["message"] = f"[试运行] 建议封禁: {assessment.reason}"
+                result["message"] = f"[试运行] 建议先禁用令牌: {assessment.reason}"
                 result["executed"] = False
             else:
-                # 执行封禁
-                ban_result = self._user_service.ban_user(
-                    user_id=user_id,
-                    reason=f"[AI自动封禁] {assessment.reason}",
-                    disable_tokens=True,
-                    operator="AI自动封禁",
-                    context={
-                        "source": "ai_auto_ban",
-                        "risk_score": assessment.risk_score,
-                        "confidence": assessment.confidence,
-                        "ai_reason": assessment.reason,
-                    },
-                )
-                result["executed"] = ban_result.get("success", False)
-                result["message"] = ban_result.get("message", "")
+                target_token = self._resolve_target_token(analysis)
+                if not target_token:
+                    result["action"] = AIBanAction.WARN.value
+                    result["message"] = f"[降级告警] AI 判定高风险，但无法确定具体令牌，未自动封禁用户: {assessment.reason}"
+                    self._storage.add_security_audit(
+                        action="ai_warn",
+                        user_id=user_id,
+                        username=username,
+                        operator="AI自动封禁",
+                        reason=assessment.reason,
+                        context={
+                            **action_context,
+                            "degraded_from": AIBanAction.BAN.value,
+                            "downgrade_reason": "token_not_determined",
+                        },
+                    )
+                else:
+                    disable_result = self._user_service.disable_token(
+                        token_id=int(target_token["token_id"]),
+                        reason=f"[AI自动禁用] {assessment.reason}",
+                        operator="AI自动封禁",
+                        context={
+                            **action_context,
+                            "token_name": target_token.get("token_name") or "",
+                        },
+                    )
+                    result["executed"] = disable_result.get("success", False)
+                    result["token_id"] = int(target_token["token_id"])
+                    result["token_name"] = target_token.get("token_name") or f"Token#{int(target_token['token_id'])}"
+
+                    if not disable_result.get("success", False):
+                        result["action"] = "error"
+                        result["message"] = disable_result.get("message", "自动禁用令牌失败")
+                    else:
+                        disable_count = self._count_ai_disabled_tokens(user_id)
+                        result["action"] = "disable_token"
+                        result["disable_count_for_user"] = disable_count
+                        result["message"] = disable_result.get("message", "")
+
+                        if disable_count > 3:
+                            ban_result = self._user_service.ban_user(
+                                user_id=user_id,
+                                reason=f"[AI自动封禁] 同一用户累计触发 {disable_count} 次自动禁用令牌，{assessment.reason}",
+                                disable_tokens=True,
+                                operator="AI自动封禁",
+                                context={
+                                    **action_context,
+                                    "auto_disabled_token_count": disable_count,
+                                    "escalated_from_token_id": int(target_token["token_id"]),
+                                    "escalated_from_token_name": target_token.get("token_name") or "",
+                                },
+                            )
+                            result["user_banned"] = ban_result.get("success", False)
+                            result["disable_count_for_user"] = disable_count
+                            if ban_result.get("success", False):
+                                result["action"] = AIBanAction.BAN.value
+                                result["message"] = f"{disable_result.get('message', '')}；{ban_result.get('message', '')}".strip("；")
+                            else:
+                                result["message"] = f"{disable_result.get('message', '')}；用户自动封禁失败: {ban_result.get('message', '')}".strip("；")
         
         elif assessment.action == AIBanAction.WARN:
             result["message"] = f"风险告警: {assessment.reason}"
@@ -1180,11 +1369,7 @@ class AIAutoBanService:
                 username=username,
                 operator="AI自动封禁",
                 reason=assessment.reason,
-                context={
-                    "source": "ai_auto_ban",
-                    "risk_score": assessment.risk_score,
-                    "confidence": assessment.confidence,
-                },
+                context=action_context,
             )
         
         elif assessment.action == AIBanAction.MONITOR:
@@ -1262,7 +1447,8 @@ class AIAutoBanService:
         stats = {
             "total_scanned": len(suspicious_users),
             "total_processed": len(results),
-            "banned": sum(1 for r in results if r.get("action") == "ban" and r.get("executed")),
+            "banned": sum(1 for r in results if r.get("action") == "ban" and r.get("user_banned")),
+            "disabled_tokens": sum(1 for r in results if r.get("action") == "disable_token" and r.get("executed")),
             "warned": sum(1 for r in results if r.get("action") == "warn"),
             "skipped": sum(1 for r in results if r.get("action") in ["skip", "monitor"]),
             "errors": sum(1 for r in results if r.get("action") == "error"),
@@ -1344,6 +1530,15 @@ class AIAutoBanService:
             "confidence_threshold": CONFIDENCE_THRESHOLD,
             "cooldown_hours": AI_ASSESSMENT_COOLDOWN // 3600,
             "scan_interval_minutes": self._scan_interval_minutes,
+            "low_token_burst_enabled": self._low_token_burst_enabled,
+            "low_token_burst_window_seconds": self._low_token_burst_window_seconds,
+            "low_token_threshold": self._low_token_threshold,
+            "low_token_ratio_threshold": self._low_token_ratio_threshold,
+            "low_token_request_threshold": self._low_token_request_threshold,
+            "token_volatility_enabled": self._token_volatility_enabled,
+            "token_volatility_window_seconds": self._token_volatility_window_seconds,
+            "token_volatility_min_requests": self._token_volatility_min_requests,
+            "token_volatility_jump_ratio": self._token_volatility_jump_ratio,
             # 自定义提示词
             "custom_prompt": self._custom_prompt,
             "default_prompt": DEFAULT_ASSESSMENT_PROMPT,

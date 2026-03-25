@@ -1,0 +1,10 @@
+# Exclude local dependencies and build outputs from Docker build context
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+
+# Common local metadata
+.git/
+.gitignore
+.vscode/
+.idea/

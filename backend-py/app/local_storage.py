@@ -342,6 +342,32 @@ class LocalStorage:
             conn.commit()
             return int(cursor.lastrowid or 0)
 
+    def count_security_audits(
+        self,
+        action: Optional[str] = None,
+        user_id: Optional[int] = None,
+        context_source: Optional[str] = None,
+    ) -> int:
+        """Count security audit records with optional action/source filters."""
+        where = []
+        params: list[Any] = []
+        if action:
+            where.append("action = ?")
+            params.append(action)
+        if user_id is not None:
+            where.append("user_id = ?")
+            params.append(int(user_id))
+        if context_source:
+            where.append("json_extract(context, '$.source') = ?")
+            params.append(context_source)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT COUNT(*) as cnt FROM security_audit {where_sql}", params)
+            row = cursor.fetchone()
+            return int((row or {}).get("cnt") or 0)
+
     def list_security_audits(
         self,
         page: int = 1,
@@ -479,7 +505,7 @@ class LocalStorage:
                 VALUES (?, ?, ?)
             """, (snapshot_type, json.dumps(data), current_time))
             conn.commit()
-            return cursor.lastrowid
+            return int(cursor.lastrowid or 0)
 
     def get_latest_snapshot(self, snapshot_type: str) -> Optional[Dict[str, Any]]:
         """Get the most recent snapshot of a given type."""
@@ -587,7 +613,7 @@ class LocalStorage:
                 )
             )
             conn.commit()
-            return cursor.lastrowid
+            return int(cursor.lastrowid or 0)
 
     def get_ai_audit_logs(
         self,
@@ -700,7 +726,7 @@ class LocalStorage:
                 )
             )
             conn.commit()
-            return cursor.lastrowid
+            return int(cursor.lastrowid or 0)
 
     def get_auto_group_logs(
         self,

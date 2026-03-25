@@ -1,0 +1,64 @@
+# 1Panel 用编排文件（本地源码构建）
+#
+# 使用说明：
+# 1. 将整个 `new_api_tools` 项目源码上传到 1Panel 项目目录。
+# 2. 确保当前目录下存在 `Dockerfile`。
+# 3. 仅修改下方必须替换项：`SQL_DSN`、`TOOLS_SQL_DSN`、`ADMIN_PASSWORD`。
+# 4. 如需 Redis，再补充 `REDIS_CONN_STRING`。
+# 5. 在 1Panel 中执行构建并启动。
+
+services:
+  newapi-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GOPROXY: ${GOPROXY}
+    container_name: ${CONTAINER_NAME}
+    ports:
+      - "${HOST_PORT}:${CONTAINER_PORT}"
+    environment:
+      # 必填：业务数据库连接串（newapi 主业务库）
+      # MySQL 示例：root:123456@tcp(mysql:3306)/newapi?charset=utf8mb4&parseTime=True&loc=Local
+      # PostgreSQL 示例：postgres://postgres:123456@postgres:5432/newapi?sslmode=disable
+      SQL_DSN: ${SQL_DSN}
+
+      # 必填：tools 配置数据库连接串（模型配置、AI监控、自动分组等配置项写入此库）
+      # 若留空，程序会回退使用 SQL_DSN，但建议显式配置独立库
+      TOOLS_SQL_DSN: ${TOOLS_SQL_DSN}
+
+      # 必填：管理后台初始密码（请务必修改）
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+
+      # 选填：Redis 连接串（如已在 1Panel 中启用 Redis，可填真实连接；不用可留空）
+      # 示例：redis://:123456@redis:6379/0
+      REDIS_CONN_STRING: ${REDIS_CONN_STRING}
+
+      # 选填：NewAPI 服务地址（用于需要主动回连 NewAPI 的功能）
+      # 示例：http://new-api:3000 或 http://宿主机IP:3000
+      NEWAPI_BASEURL: ${NEWAPI_BASEURL}
+
+      # 选填：JWT 密钥；留空时由程序自动生成，但容器重启后登录态可能失效
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+
+      # 选填：JWT 过期时间（小时）
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS}
+
+      # 选填：时区
+      TIMEZONE: ${TIMEZONE}
+
+      # 选填：日志级别
+      LOG_LEVEL: ${LOG_LEVEL}
+
+      # 程序内部监听端口，通常无需修改
+      SERVER_HOST: ${SERVER_HOST}
+      SERVER_PORT: ${SERVER_PORT}
+    volumes:
+      - ${DATA_VOLUME_SOURCE}:${DATA_VOLUME_TARGET}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "${HEALTHCHECK_URL}"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+      start_period: ${HEALTHCHECK_START_PERIOD}

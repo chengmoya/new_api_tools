@@ -18,6 +18,7 @@ import (
 	"github.com/new-api-tools/backend/internal/logger"
 	"github.com/new-api-tools/backend/internal/middleware"
 	"github.com/new-api-tools/backend/internal/service"
+	"github.com/new-api-tools/backend/internal/storage"
 )
 
 func main() {
@@ -28,7 +29,8 @@ func main() {
 	logger.Init(cfg.LogLevel, cfg.LogFile)
 	logger.L.Banner("🚀 NewAPI Middleware Tool - Go Backend")
 	logger.L.System(fmt.Sprintf("服务器地址: %s", cfg.ServerAddr()))
-	logger.L.System(fmt.Sprintf("数据库引擎: %s", cfg.DatabaseEngine))
+	logger.L.System(fmt.Sprintf("业务数据库引擎: %s", cfg.DatabaseEngine))
+	logger.L.System(fmt.Sprintf("配置数据库引擎: %s", cfg.ToolsDatabaseEngine))
 	logger.L.System(fmt.Sprintf("时区: %s", cfg.TimeZone))
 
 	// ========== 3. Initialize database ==========
@@ -61,7 +63,13 @@ func main() {
 	}
 	defer cache.Close()
 
-	// ========== 5. Setup Gin router ==========
+	// ========== 5. Initialize config storage ==========
+	if err := storage.Init(); err != nil {
+		logger.L.Warn("配置存储初始化失败，将使用兼容缓存模式: " + err.Error())
+	}
+	defer storage.Close()
+
+	// ========== 6. Setup Gin router ==========
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 
@@ -70,7 +78,7 @@ func main() {
 	r.Use(middleware.CORSMiddleware())          // CORS
 	r.Use(middleware.RequestLoggerMiddleware()) // Request logging
 
-	// ========== 6. Register routes ==========
+	// ========== 7. Register routes ==========
 
 	// Health check (no auth required)
 	handler.RegisterHealthRoutes(r)
@@ -110,13 +118,13 @@ func main() {
 	// Public embed routes (no auth)
 	handler.RegisterModelStatusEmbedRoutes(r)
 
-	// ========== 7. Background tasks ==========
+	// ========== 8. Background tasks ==========
 
 	// IP recording enforcement: check every 10 minutes, enable if any user disabled it
 	stopIPEnforce := make(chan struct{})
 	go backgroundEnforceIPRecording(stopIPEnforce)
 
-	// ========== 8. Start server with graceful shutdown ==========
+	// ========== 9. Start server with graceful shutdown ==========
 	srv := &http.Server{
 		Addr:         cfg.ServerAddr(),
 		Handler:      r,
@@ -133,7 +141,7 @@ func main() {
 		}
 	}()
 
-	// ========== 9. Wait for interrupt signal ==========
+	// ========== 10. Wait for interrupt signal ==========
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

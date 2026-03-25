@@ -372,6 +372,15 @@ export function RealtimeRanking() {
     masked_api_key?: string
     scan_interval_minutes?: number
     whitelist_count?: number
+    low_token_burst_enabled?: boolean
+    low_token_burst_window_seconds?: number
+    low_token_threshold?: number
+    low_token_ratio_threshold?: number
+    low_token_request_threshold?: number
+    token_volatility_enabled?: boolean
+    token_volatility_window_seconds?: number
+    token_volatility_min_requests?: number
+    token_volatility_jump_ratio?: number
     custom_prompt?: string
     default_prompt?: string
     whitelist_ips?: string[]
@@ -448,6 +457,15 @@ export function RealtimeRanking() {
     enabled: false,
     dry_run: true,
     scan_interval_minutes: 0,  // 0 表示关闭定时扫描
+    low_token_burst_enabled: true,
+    low_token_burst_window_seconds: 3600,
+    low_token_threshold: 500,
+    low_token_ratio_threshold: 0.8,
+    low_token_request_threshold: 50,
+    token_volatility_enabled: true,
+    token_volatility_window_seconds: 3600,
+    token_volatility_min_requests: 5,
+    token_volatility_jump_ratio: 5,
   })
   const [aiModels, setAiModels] = useState<Array<{ id: string; owned_by: string }>>([])
   const [aiModelLoading, setAiModelLoading] = useState(false)
@@ -1096,6 +1114,15 @@ export function RealtimeRanking() {
           enabled: aiConfigEdit.enabled,
           dry_run: aiConfigEdit.dry_run,
           scan_interval_minutes: aiConfigEdit.scan_interval_minutes,
+          low_token_burst_enabled: aiConfigEdit.low_token_burst_enabled,
+          low_token_burst_window_seconds: aiConfigEdit.low_token_burst_window_seconds,
+          low_token_threshold: aiConfigEdit.low_token_threshold,
+          low_token_ratio_threshold: aiConfigEdit.low_token_ratio_threshold,
+          low_token_request_threshold: aiConfigEdit.low_token_request_threshold,
+          token_volatility_enabled: aiConfigEdit.token_volatility_enabled,
+          token_volatility_window_seconds: aiConfigEdit.token_volatility_window_seconds,
+          token_volatility_min_requests: aiConfigEdit.token_volatility_min_requests,
+          token_volatility_jump_ratio: aiConfigEdit.token_volatility_jump_ratio,
         }),
       })
       const res = await response.json()
@@ -1179,6 +1206,15 @@ export function RealtimeRanking() {
         enabled: aiConfig.enabled,
         dry_run: aiConfig.dry_run,
         scan_interval_minutes: aiConfig.scan_interval_minutes || 0,
+        low_token_burst_enabled: aiConfig.low_token_burst_enabled ?? true,
+        low_token_burst_window_seconds: aiConfig.low_token_burst_window_seconds || 3600,
+        low_token_threshold: aiConfig.low_token_threshold || 500,
+        low_token_ratio_threshold: aiConfig.low_token_ratio_threshold || 0.8,
+        low_token_request_threshold: aiConfig.low_token_request_threshold || 50,
+        token_volatility_enabled: aiConfig.token_volatility_enabled ?? true,
+        token_volatility_window_seconds: aiConfig.token_volatility_window_seconds || 3600,
+        token_volatility_min_requests: aiConfig.token_volatility_min_requests || 5,
+        token_volatility_jump_ratio: aiConfig.token_volatility_jump_ratio || 5,
       })
     }
   }, [aiConfig, aiConfigExpanded])
@@ -3282,6 +3318,63 @@ export function RealtimeRanking() {
                           <option value={720}>每 12 小时</option>
                           <option value={1440}>每 24 小时</option>
                         </Select>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-4 space-y-4">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-800">MVP 风险规则</div>
+                          <div className="text-xs text-slate-500 mt-1">新增高频低 Token 与 Token 消耗剧烈波动检测，结果将并入 AI 自动封禁扫描来源。</div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <label className="space-y-2 text-sm text-slate-700">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={aiConfigEdit.low_token_burst_enabled}
+                                onChange={(e) => setAiConfigEdit(prev => ({ ...prev, low_token_burst_enabled: e.target.checked }))}
+                                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="font-medium">启用高频低 Token 检测</span>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 pl-6">
+                              <Input type="number" value={aiConfigEdit.low_token_burst_window_seconds} onChange={(e) => setAiConfigEdit(prev => ({ ...prev, low_token_burst_window_seconds: parseInt(e.target.value || '0') }))} className="h-9 bg-white" />
+                              <Input type="number" value={aiConfigEdit.low_token_threshold} onChange={(e) => setAiConfigEdit(prev => ({ ...prev, low_token_threshold: parseInt(e.target.value || '0') }))} className="h-9 bg-white" />
+                              <Input type="number" step="0.01" min="0" max="1" value={aiConfigEdit.low_token_ratio_threshold} onChange={(e) => setAiConfigEdit(prev => ({ ...prev, low_token_ratio_threshold: parseFloat(e.target.value || '0') }))} className="h-9 bg-white" />
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 pl-6 text-[11px] text-slate-500">
+                              <span>窗口秒数</span>
+                              <span>低 Token 阈值</span>
+                              <span>低 Token 占比</span>
+                            </div>
+                            <div className="pl-6">
+                              <Input type="number" value={aiConfigEdit.low_token_request_threshold} onChange={(e) => setAiConfigEdit(prev => ({ ...prev, low_token_request_threshold: parseInt(e.target.value || '0') }))} className="h-9 bg-white max-w-[180px]" />
+                              <div className="text-[11px] text-slate-500 mt-1">最小请求数</div>
+                            </div>
+                          </label>
+
+                          <label className="space-y-2 text-sm text-slate-700">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={aiConfigEdit.token_volatility_enabled}
+                                onChange={(e) => setAiConfigEdit(prev => ({ ...prev, token_volatility_enabled: e.target.checked }))}
+                                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="font-medium">启用 Token 波动检测</span>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 pl-6">
+                              <Input type="number" value={aiConfigEdit.token_volatility_window_seconds} onChange={(e) => setAiConfigEdit(prev => ({ ...prev, token_volatility_window_seconds: parseInt(e.target.value || '0') }))} className="h-9 bg-white" />
+                              <Input type="number" value={aiConfigEdit.token_volatility_min_requests} onChange={(e) => setAiConfigEdit(prev => ({ ...prev, token_volatility_min_requests: parseInt(e.target.value || '0') }))} className="h-9 bg-white" />
+                              <Input type="number" step="0.1" min="1" value={aiConfigEdit.token_volatility_jump_ratio} onChange={(e) => setAiConfigEdit(prev => ({ ...prev, token_volatility_jump_ratio: parseFloat(e.target.value || '0') }))} className="h-9 bg-white" />
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 pl-6 text-[11px] text-slate-500">
+                              <span>窗口秒数</span>
+                              <span>最小请求数</span>
+                              <span>跳变倍数</span>
+                            </div>
+                          </label>
+                        </div>
                       </div>
                     </div>
                   </div>

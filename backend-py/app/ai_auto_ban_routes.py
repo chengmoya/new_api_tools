@@ -28,6 +28,15 @@ class SaveConfigRequest(BaseModel):
     enabled: Optional[bool] = None
     dry_run: Optional[bool] = None
     scan_interval_minutes: Optional[int] = None  # 定时扫描间隔（分钟），0表示关闭
+    low_token_burst_enabled: Optional[bool] = None
+    low_token_burst_window_seconds: Optional[int] = None
+    low_token_threshold: Optional[int] = None
+    low_token_ratio_threshold: Optional[float] = None
+    low_token_request_threshold: Optional[int] = None
+    token_volatility_enabled: Optional[bool] = None
+    token_volatility_window_seconds: Optional[int] = None
+    token_volatility_min_requests: Optional[int] = None
+    token_volatility_jump_ratio: Optional[float] = None
     custom_prompt: Optional[str] = None  # 自定义 AI 评估提示词
     whitelist_ips: Optional[list] = None  # IP 白名单（可信IP，如办公室、机房IP）
     blacklist_ips: Optional[list] = None  # IP 黑名单（已知恶意IP）
@@ -94,6 +103,38 @@ async def save_config(
         if interval != 0 and (interval < 15 or interval > 1440):
             raise HTTPException(status_code=400, detail="扫描间隔必须为0（关闭）或15-1440分钟")
         config["scan_interval_minutes"] = interval
+    if request.low_token_burst_enabled is not None:
+        config["low_token_burst_enabled"] = request.low_token_burst_enabled
+    if request.low_token_burst_window_seconds is not None:
+        if request.low_token_burst_window_seconds <= 0:
+            raise HTTPException(status_code=400, detail="高频低Token检测窗口必须大于0")
+        config["low_token_burst_window_seconds"] = request.low_token_burst_window_seconds
+    if request.low_token_threshold is not None:
+        if request.low_token_threshold <= 0:
+            raise HTTPException(status_code=400, detail="低Token阈值必须大于0")
+        config["low_token_threshold"] = request.low_token_threshold
+    if request.low_token_ratio_threshold is not None:
+        if request.low_token_ratio_threshold <= 0 or request.low_token_ratio_threshold > 1:
+            raise HTTPException(status_code=400, detail="低Token占比阈值必须在0到1之间")
+        config["low_token_ratio_threshold"] = request.low_token_ratio_threshold
+    if request.low_token_request_threshold is not None:
+        if request.low_token_request_threshold <= 0:
+            raise HTTPException(status_code=400, detail="高频低Token最小请求数必须大于0")
+        config["low_token_request_threshold"] = request.low_token_request_threshold
+    if request.token_volatility_enabled is not None:
+        config["token_volatility_enabled"] = request.token_volatility_enabled
+    if request.token_volatility_window_seconds is not None:
+        if request.token_volatility_window_seconds <= 0:
+            raise HTTPException(status_code=400, detail="波动检测窗口必须大于0")
+        config["token_volatility_window_seconds"] = request.token_volatility_window_seconds
+    if request.token_volatility_min_requests is not None:
+        if request.token_volatility_min_requests <= 1:
+            raise HTTPException(status_code=400, detail="波动检测最小请求数必须大于1")
+        config["token_volatility_min_requests"] = request.token_volatility_min_requests
+    if request.token_volatility_jump_ratio is not None:
+        if request.token_volatility_jump_ratio <= 1:
+            raise HTTPException(status_code=400, detail="波动跳变倍数必须大于1")
+        config["token_volatility_jump_ratio"] = request.token_volatility_jump_ratio
     if request.custom_prompt is not None:
         config["custom_prompt"] = request.custom_prompt
     if request.whitelist_ips is not None:

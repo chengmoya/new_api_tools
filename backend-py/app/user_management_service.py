@@ -1330,18 +1330,22 @@ class UserManagementService:
             logger.db_error(f"解除封禁失败: {e}")
             return {"success": False, "message": f"解除封禁失败: {str(e)}"}
 
-    def disable_token(
+    def _set_token_status(
         self,
         token_id: int,
+        target_status: int,
+        action: str,
+        action_label: str,
+        success_message: str,
+        already_message: str,
         reason: Optional[str] = None,
         operator: str = "",
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """禁用单个令牌（设置 status=2）。"""
+        """设置单个令牌状态并写入审计日志。"""
         try:
             self._db.connect()
 
-            # 获取令牌信息
             token_rows = self._db.execute(
                 """SELECT t.id, t.name, t.user_id, t.status, u.username
                    FROM tokens t
@@ -1354,33 +1358,33 @@ class UserManagementService:
                 return {"success": False, "message": "令牌不存在"}
 
             token_info = token_rows[0]
+            token_user_id = int(token_info.get("user_id") or 0)
             token_name = token_info.get("name") or f"Token#{token_id}"
-            username = token_info.get("username") or f"User#{token_info.get('user_id')}"
-            current_status = token_info.get("status")
+            username = token_info.get("username") or f"User#{token_user_id}"
+            current_status = int(token_info.get("status") or 0)
 
-            if current_status == 2:
-                return {"success": False, "message": "令牌已处于禁用状态"}
+            if current_status == target_status:
+                return {"success": False, "message": already_message}
 
-            # 更新令牌状态
             result = self._db.execute(
-                "UPDATE tokens SET status = 2 WHERE id = :token_id AND deleted_at IS NULL",
-                {"token_id": token_id},
+                "UPDATE tokens SET status = :status WHERE id = :token_id AND deleted_at IS NULL",
+                {"status": target_status, "token_id": token_id},
             )
 
             affected = int((result[0] or {}).get("affected_rows", 0) or 0)
 
             logger.security(
-                "禁用令牌",
+                action_label,
                 token_id=token_id,
                 token_name=token_name,
-                user_id=token_info.get("user_id"),
+                user_id=token_user_id,
                 username=username,
                 reason=reason or "",
             )
 
             self._storage.add_security_audit(
-                action="disable_token",
-                user_id=token_info.get("user_id"),
+                action=action,
+                user_id=token_user_id,
                 username=username,
                 operator=operator,
                 reason=reason or "",
@@ -1393,16 +1397,57 @@ class UserManagementService:
 
             return {
                 "success": True,
-                "message": f"令牌 {token_name} 已禁用",
+                "message": success_message.format(token_name=token_name),
                 "data": {
                     "token_id": token_id,
                     "token_name": token_name,
                     "affected": affected,
+                    "status": target_status,
                 },
             }
         except Exception as e:
-            logger.db_error(f"禁用令牌失败: {e}")
-            return {"success": False, "message": f"禁用令牌失败: {str(e)}"}
+            logger.db_error(f"{action_label}失败: {e}")
+            return {"success": False, "message": f"{action_label}失败: {str(e)}"}
+
+    def disable_token(
+        self,
+        token_id: int,
+        reason: Optional[str] = None,
+        operator: str = "",
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """禁用单个令牌（设置 status=2）。"""
+        return self._set_token_status(
+            token_id=token_id,
+            target_status=2,
+            action="disable_token",
+            action_label="禁用令牌",
+            success_message="令牌 {token_name} 已禁用",
+            already_message="令牌已处于禁用状态",
+            reason=reason,
+            operator=operator,
+            context=context,
+        )
+
+    def enable_token(
+        self,
+        token_id: int,
+        reason: Optional[str] = None,
+        operator: str = "",
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """启用单个令牌（设置 status=1）。"""
+        return self._set_token_status(
+            token_id=token_id,
+            target_status=1,
+            action="enable_token",
+            action_label="启用令牌",
+            success_message="令牌 {token_name} 已启用",
+            already_message="令牌已处于启用状态",
+            reason=reason,
+            operator=operator,
+            context=context,
+        )
 
     def get_user_invited_list(
         self,

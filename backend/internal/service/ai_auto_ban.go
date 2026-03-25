@@ -13,16 +13,18 @@ import (
 
 	"github.com/new-api-tools/backend/internal/cache"
 	"github.com/new-api-tools/backend/internal/database"
+	"github.com/new-api-tools/backend/internal/storage"
 )
 
 // AIAutoBanService handles AI-assisted automatic user banning
 type AIAutoBanService struct {
-	db *database.Manager
+	db    *database.Manager
+	store *storage.ConfigStore
 }
 
 // NewAIAutoBanService creates a new AIAutoBanService
 func NewAIAutoBanService() *AIAutoBanService {
-	return &AIAutoBanService{db: database.Get()}
+	return &AIAutoBanService{db: database.Get(), store: storage.GetConfigStore()}
 }
 
 // Default config
@@ -42,9 +44,8 @@ var defaultAIBanConfig = map[string]interface{}{
 
 // GetConfig returns AI auto ban configuration with computed fields
 func (s *AIAutoBanService) GetConfig() map[string]interface{} {
-	cm := cache.Get()
 	var config map[string]interface{}
-	found, _ := cm.GetJSON("ai_ban:config", &config)
+	found, _ := s.store.GetJSON("ai_ban:config", &config)
 	if !found {
 		config = make(map[string]interface{})
 		for k, v := range defaultAIBanConfig {
@@ -71,10 +72,8 @@ func (s *AIAutoBanService) GetConfig() map[string]interface{} {
 
 // SaveConfig saves AI auto ban configuration
 func (s *AIAutoBanService) SaveConfig(updates map[string]interface{}) error {
-	cm := cache.Get()
-	// Read raw config from Redis (not via GetConfig which adds computed fields)
 	var config map[string]interface{}
-	found, _ := cm.GetJSON("ai_ban:config", &config)
+	found, _ := s.store.GetJSON("ai_ban:config", &config)
 	if !found {
 		config = make(map[string]interface{})
 		for k, v := range defaultAIBanConfig {
@@ -82,17 +81,14 @@ func (s *AIAutoBanService) SaveConfig(updates map[string]interface{}) error {
 		}
 	}
 
-	// Apply updates
 	for k, v := range updates {
 		config[k] = v
 	}
 
-	// Strip computed fields before saving (they are re-computed in GetConfig)
 	delete(config, "has_api_key")
 	delete(config, "masked_api_key")
 
-	cm.Set("ai_ban:config", config, 0)
-	return nil
+	return s.store.SetJSON("ai_ban:config", config, "AI 自动封禁配置")
 }
 
 // ResetAPIHealth resets the API health status
@@ -556,9 +552,8 @@ func (s *AIAutoBanService) TestModel(baseURL, apiKey, model string) map[string]i
 
 // GetWhitelist returns the whitelist user IDs
 func (s *AIAutoBanService) GetWhitelist() map[string]interface{} {
-	cm := cache.Get()
 	var whitelist []int64
-	cm.GetJSON("ai_ban:whitelist", &whitelist)
+	s.store.GetJSON("ai_ban:whitelist", &whitelist)
 
 	items := make([]map[string]interface{}, 0)
 	if len(whitelist) > 0 {
@@ -584,9 +579,8 @@ func (s *AIAutoBanService) GetWhitelist() map[string]interface{} {
 
 // AddToWhitelist adds a user to the whitelist
 func (s *AIAutoBanService) AddToWhitelist(userID int64) map[string]interface{} {
-	cm := cache.Get()
 	var whitelist []int64
-	cm.GetJSON("ai_ban:whitelist", &whitelist)
+	s.store.GetJSON("ai_ban:whitelist", &whitelist)
 
 	for _, uid := range whitelist {
 		if uid == userID {
@@ -594,15 +588,16 @@ func (s *AIAutoBanService) AddToWhitelist(userID int64) map[string]interface{} {
 		}
 	}
 	whitelist = append(whitelist, userID)
-	cm.Set("ai_ban:whitelist", whitelist, 0)
+	if err := s.store.SetJSON("ai_ban:whitelist", whitelist, "AI 自动封禁白名单"); err != nil {
+		return map[string]interface{}{"message": "保存白名单失败: " + err.Error()}
+	}
 	return map[string]interface{}{"message": fmt.Sprintf("用户 %d 已加入白名单", userID)}
 }
 
 // RemoveFromWhitelist removes a user from the whitelist
 func (s *AIAutoBanService) RemoveFromWhitelist(userID int64) map[string]interface{} {
-	cm := cache.Get()
 	var whitelist []int64
-	cm.GetJSON("ai_ban:whitelist", &whitelist)
+	s.store.GetJSON("ai_ban:whitelist", &whitelist)
 
 	newList := make([]int64, 0)
 	for _, uid := range whitelist {
@@ -610,7 +605,9 @@ func (s *AIAutoBanService) RemoveFromWhitelist(userID int64) map[string]interfac
 			newList = append(newList, uid)
 		}
 	}
-	cm.Set("ai_ban:whitelist", newList, 0)
+	if err := s.store.SetJSON("ai_ban:whitelist", newList, "AI 自动封禁白名单"); err != nil {
+		return map[string]interface{}{"message": "保存白名单失败: " + err.Error()}
+	}
 	return map[string]interface{}{"message": fmt.Sprintf("用户 %d 已从白名单移除", userID)}
 }
 

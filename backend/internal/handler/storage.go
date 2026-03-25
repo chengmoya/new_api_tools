@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/new-api-tools/backend/internal/cache"
 	"github.com/new-api-tools/backend/internal/models"
+	"github.com/new-api-tools/backend/internal/storage"
 )
 
 // RegisterStorageRoutes registers /api/storage endpoints
@@ -33,22 +34,22 @@ func RegisterStorageRoutes(r *gin.RouterGroup) {
 
 // GET /api/storage/config
 func GetAllConfigs(c *gin.Context) {
-	cm := cache.Get()
-	configs, err := cm.GetAllHashFields("app:config")
+	store := storage.GetConfigStore()
+	configs, err := store.GetAll()
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": true, "data": map[string]interface{}{}})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": configs})
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": configs, "backend": store.ActiveBackend()})
 }
 
 // GET /api/storage/config/:key
 func GetConfig(c *gin.Context) {
 	key := c.Param("key")
-	cm := cache.Get()
+	store := storage.GetConfigStore()
 
-	value, err := cm.HashGet("app:config", key)
-	if err != nil || value == "" {
+	record, found, err := store.GetRecord(key)
+	if err != nil || !found {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "Configuration key '" + key + "' not found",
@@ -58,7 +59,7 @@ func GetConfig(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    gin.H{"key": key, "value": value},
+		"data":    gin.H{"key": key, "value": record.Value, "description": record.Description, "backend": record.Backend},
 	})
 }
 
@@ -75,8 +76,8 @@ func SetConfig(c *gin.Context) {
 		return
 	}
 
-	cm := cache.Get()
-	if err := cm.HashSet("app:config", req.Key, req.Value); err != nil {
+	store := storage.GetConfigStore()
+	if err := store.SetValue(req.Key, req.Value, req.Description); err != nil {
 		c.JSON(http.StatusInternalServerError, models.ErrorResp("STORAGE_ERROR", "Failed to save config", err.Error()))
 		return
 	}
@@ -91,10 +92,9 @@ func SetConfig(c *gin.Context) {
 // DELETE /api/storage/config/:key
 func DeleteConfig(c *gin.Context) {
 	key := c.Param("key")
-	cm := cache.Get()
+	store := storage.GetConfigStore()
 
-	deleted, err := cm.HashDelete("app:config", key)
-	if err != nil || !deleted {
+	if err := store.DeleteValue(key); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "Configuration '" + key + "' not found",
@@ -176,11 +176,12 @@ func ClearDashboardCache(c *gin.Context) {
 
 // GET /api/storage/info
 func GetStorageInfo(c *gin.Context) {
-	cm := cache.Get()
-	stats := cm.GetStats()
+	store := storage.GetConfigStore()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    stats,
+		"data": gin.H{
+			"backend": store.ActiveBackend(),
+		},
 	})
 }
